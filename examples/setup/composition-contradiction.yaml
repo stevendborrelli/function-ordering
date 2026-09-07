@@ -1,0 +1,24 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xorderings.ordering.example.org
+spec:
+  compositeTypeRef:
+    apiVersion: ordering.example.org/v1alpha1
+    kind: XOrdering
+  mode: Pipeline
+  pipeline:
+  - step: compose-in-order
+    functionRef:
+      name: function-ordering
+    input:
+      apiVersion: ordering.fn.crossplane.io/v1alpha1
+      kind: Input
+      # The pipeline wants the vpc deleted but keeps a subnet that depends on
+      # it. Neither can move: the subnet can't be updated because its
+      # dependency will never be ready again, and the vpc can't be deleted
+      # while the subnet still exists.
+      resources: [vpc, subnet]
+      remove: [vpc]
+      edges:
+      - {resource: subnet, dependsOn: vpc}
