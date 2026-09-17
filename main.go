@@ -43,6 +43,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -78,6 +79,22 @@ type input struct {
 	// milliseconds. Readiness is then read from the resource itself, the way a
 	// real function would, rather than assumed on first sight.
 	ReadyAfter string `json:"readyAfter"`
+
+	// DeleteAfter composes NopResources whose deletion takes this long, so
+	// that a teardown wave is observable rather than completing before
+	// anything can look at it. Implies NopResources, like ReadyAfter.
+	DeleteAfter string `json:"deleteAfter"`
+
+	// DeleteError makes the resources named in DeleteErrorOn refuse to delete,
+	// with this message. Teardown then blocks on them until something clears
+	// the field, which is how a test exercises a composed resource that cannot
+	// be deleted - a provider that can't reach its API, or an external
+	// resource something else still holds.
+	DeleteError string `json:"deleteError"`
+
+	// DeleteErrorOn names the resources DeleteError applies to. Leave empty to
+	// apply it to none.
+	DeleteErrorOn []string `json:"deleteErrorOn"`
 
 	// Requires declares resources the pipeline needs but doesn't compose.
 	Requires []requirement `json:"requires"`
@@ -168,8 +185,8 @@ func (f *function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 				err error
 			)
 
-			if in.ReadyAfter != "" {
-				res, err = nopResource(name, ns, in.ReadyAfter)
+			if in.ReadyAfter != "" || in.DeleteAfter != "" || in.DeleteError != "" {
+				res, err = nopResource(name, ns, in.ReadyAfter, in.DeleteAfter, deleteErrorFor(in, name))
 			} else {
 				res, err = configMap(name, ns)
 			}
@@ -275,21 +292,42 @@ func readiness(req *fnv1.RunFunctionRequest, name string, fromCondition bool) fn
 	return fnv1.Ready_READY_FALSE
 }
 
-// nopResource returns a NopResource that reports Ready after the given delay.
-// It lets a test observe ordering over seconds rather than milliseconds.
-func nopResource(name, namespace, after string) (*structpb.Struct, error) {
+// deleteErrorFor returns the delete error to give a composed resource, which
+// is set only for the resources DeleteErrorOn names.
+func deleteErrorFor(in *input, name string) string {
+	if slices.Contains(in.DeleteErrorOn, name) {
+		return in.DeleteError
+	}
+
+	return ""
+}
+
+// nopResource returns a NopResource that reports Ready after readyAfter, and
+// whose deletion takes deleteAfter. Either may be empty. Together they let a
+// test observe creation and teardown over seconds rather than milliseconds.
+func nopResource(name, namespace, readyAfter, deleteAfter, deleteError string) (*structpb.Struct, error) {
+	fp := map[string]any{}
+
+	if readyAfter != "" {
+		fp["conditionAfter"] = []any{
+			map[string]any{"time": "0s", "conditionType": "Ready", "conditionStatus": "False"},
+			map[string]any{"time": readyAfter, "conditionType": "Ready", "conditionStatus": "True"},
+		}
+	}
+
+	if deleteAfter != "" {
+		fp["deleteAfter"] = deleteAfter
+	}
+
+	if deleteError != "" {
+		fp["deleteError"] = deleteError
+	}
+
 	m := map[string]any{
 		"apiVersion": "nop.crossplane.io/v1alpha1",
 		"kind":       "NopResource",
 		"metadata":   map[string]any{"namespace": namespace},
-		"spec": map[string]any{
-			"forProvider": map[string]any{
-				"conditionAfter": []any{
-					map[string]any{"time": "0s", "conditionType": "Ready", "conditionStatus": "False"},
-					map[string]any{"time": after, "conditionType": "Ready", "conditionStatus": "True"},
-				},
-			},
-		},
+		"spec":       map[string]any{"forProvider": fp},
 	}
 
 	s, err := structpb.NewStruct(m)

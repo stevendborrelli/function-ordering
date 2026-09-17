@@ -21,4 +21,4 @@ require (
 // proto package has to be taken from that branch.
 //
 // Drop this once the field lands upstream, and require a real version instead.
-replace github.com/crossplane/crossplane/v2 => github.com/stevendborrelli/crossplane/v2 v2.0.0-20260917093218-28de049245f7
+replace github.com/crossplane/crossplane/v2 => github.com/stevendborrelli/crossplane/v2 v2.0.0-20260917101256-7a709b765037
