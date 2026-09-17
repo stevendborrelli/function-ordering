@@ -226,10 +226,18 @@ func (f *function) RunFunction(_ context.Context, req *fnv1.RunFunctionRequest) 
 	}
 
 	for _, e := range in.Edges {
+		// The protocol carries the create-before-destroy choice as a
+		// DependencyLifecycle enum rather than a boolean, so that further
+		// lifecycle policies can be added without a second flag.
+		lifecycle := fnv1.DependencyLifecycle_DEPENDENCY_LIFECYCLE_UNSPECIFIED
+		if e.CreateBeforeDestroy {
+			lifecycle = fnv1.DependencyLifecycle_DEPENDENCY_LIFECYCLE_CREATE_BEFORE_DESTROY
+		}
+
 		rsp.Dependencies.Items = append(rsp.Dependencies.Items, &fnv1.Dependency{
-			Resource:                                 e.Resource,
-			DependsOn:                                &fnv1.Dependency_ComposedResource{ComposedResource: e.DependsOn},
-			CreateResourceBeforeDestroyingDependency: e.CreateBeforeDestroy,
+			Resource:  e.Resource,
+			DependsOn: &fnv1.Dependency_ComposedResource{ComposedResource: e.DependsOn},
+			Lifecycle: lifecycle,
 		})
 	}
 
