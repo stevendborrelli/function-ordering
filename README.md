@@ -56,6 +56,26 @@ Some rules keep function-sequencer's behavior even so:
   enforced by holding resources back and composing `Usage`s. It can be mixed
   with plain rules in one step.
 
+## Installing it
+
+```yaml
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-ordering
+spec:
+  package: ghcr.io/stevendborrelli/function-ordering:v0.7.0-ordering.1
+```
+
+It works against any Crossplane. To have it declare dependencies rather than
+behave as function-sequencer, Crossplane has to support them. A build of the
+prototype with ordering turned on is published as a Helm chart:
+
+```shell
+helm install crossplane oci://ghcr.io/stevendborrelli/charts/crossplane \
+  --version 2.5.0-ordering.2 -n crossplane-system --create-namespace
+```
+
 ## Adopting it
 
 The input keeps function-sequencer's API group, `sequencer.fn.crossplane.io`,
