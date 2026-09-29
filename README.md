@@ -1,3 +1,81 @@
+# function-ordering
+
+A fork of [function-sequencer][upstream] that declares its sequencing rules to
+Crossplane as dependencies, for a Crossplane that orders composed resources
+itself.
+
+> **Work in progress.** Composed resource ordering is a Crossplane prototype,
+> open as [crossplane/crossplane#7842][pr] with the design in
+> [crossplane/crossplane#7841][design]. This fork builds against a
+> [function-sdk-go branch][sdk] that carries the new protocol messages.
+
+[upstream]: https://github.com/crossplane-contrib/function-sequencer
+[pr]: https://github.com/crossplane/crossplane/pull/7842
+[design]: https://github.com/crossplane/crossplane/pull/7841
+[sdk]: https://github.com/stevendborrelli/function-sdk-go/tree/composed-resource-dependencies
+
+## What changes
+
+Nothing, unless Crossplane advertises `CAPABILITY_DEPENDENCIES`. Against any
+other Crossplane this is function-sequencer, and everything below this section
+applies as written.
+
+Against a Crossplane that orders composed resources, a plain rule becomes
+dependencies. Each resource depends on every resource before it in its
+sequence, with patterns expanded against the names in desired and observed
+state:
+
+```yaml
+rules:
+- sequence: [vpc, subnet, security-group]
+# subnet -> vpc, security-group -> vpc, security-group -> subnet
+```
+
+Crossplane then creates each resource once what it depends on is ready, and
+deletes it only once what depends on it is gone. So compared with
+function-sequencer:
+
+- **Nothing is removed from desired state.** Crossplane holds resources back
+  itself, and says what it is holding back and why in the XR's
+  `status.crossplane.pendingResources`.
+- **No `Usage`s are composed.** Crossplane orders deletion from the same
+  dependencies, including when the XR itself is deleted, without a foreground
+  cascade.
+- **`resetCompositeReadiness` isn't needed** for those rules, because
+  Crossplane already reports the XR as incomplete while it waits.
+
+Some rules keep function-sequencer's behavior even so:
+
+- **A sequence entry that matches no resource.** function-sequencer holds its
+  successors back until one exists. Crossplane ignores a dependency on a
+  resource it doesn't know about, so those successors are still left out of
+  desired state.
+- **`deleteOnly`, `createOnly` and `condition`.** A dependency orders creation
+  and deletion together, whatever the pipeline's state, so a rule that
+  separates the two directions, or applies only under a condition, is still
+  enforced by holding resources back and composing `Usage`s. It can be mixed
+  with plain rules in one step.
+
+## Adopting it
+
+The input keeps function-sequencer's API group, `sequencer.fn.crossplane.io`,
+so a Composition switches by changing its `functionRef`:
+
+```yaml
+  - step: sequence-creation
+    functionRef:
+      name: function-ordering   # was function-sequencer
+    input:
+      apiVersion: sequencer.fn.crossplane.io/v1beta1
+      kind: Input
+      rules:
+      - sequence: [first-resource, second-resource]
+```
+
+---
+
+The rest of this README is function-sequencer's.
+
 # function-sequencer
 
 Function Sequencer is a Crossplane function that enables Composition authors to define sequencing rules delaying the
