@@ -98,6 +98,10 @@ linters:
     # to scope errors.
     - noinlineerr
   settings:
+    gomoddirectives:
+      # The dependency messages aren't in a released function-sdk-go yet.
+      replace-allow-list:
+        - github.com/crossplane/function-sdk-go
     depguard:
       rules:
         no_third_party_test_libraries:

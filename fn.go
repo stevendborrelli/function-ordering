@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +16,7 @@ import (
 	"github.com/crossplane/crossplane-runtime/v2/pkg/logging"
 	apiextensionsv1beta1 "github.com/crossplane/crossplane/apis/v2/apiextensions/v1beta1"
 	protectionv1beta1 "github.com/crossplane/crossplane/apis/v2/protection/v1beta1"
-	"github.com/crossplane/function-sequencer/input/v1beta1"
+	"github.com/stevendborrelli/function-ordering/input/v1beta1"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -132,12 +133,31 @@ func (f *Function) RunFunction(_ context.Context, req *v1.RunFunctionRequest) (*
 
 	usages := make(map[resource.Name]*resource.DesiredComposed)
 
+	// A Crossplane that orders composed resources itself is told the rules as
+	// dependencies, rather than having them enforced by holding resources
+	// back and composing Usages. See declareDependencies.
+	graph := request.HasCapability(req, v1.Capability_CAPABILITY_DEPENDENCIES)
+	declared := declaredDependencies(rsp)
+
 	for _, rule := range in.Rules {
 		sequence := rule.Sequence
 
 		if rule.DeleteOnly && rule.CreateOnly {
 			response.Fatal(rsp, errors.Errorf("rule for sequence %v cannot have both deleteOnly and createOnly set to true", sequence))
 			return rsp, nil
+		}
+
+		// A dependency orders creation and deletion together, and holds
+		// whatever the pipeline's state. A rule that separates the two
+		// directions, or applies only under a condition, can't be expressed
+		// as one, so it keeps being enforced the way function-sequencer
+		// always has.
+		if graph && rule.Condition == "" && !rule.DeleteOnly && !rule.CreateOnly {
+			if err := f.declareDependencies(rsp, sequence, desiredComposed, observedComposed, declared, in.ResetCompositeReadiness); err != nil {
+				response.Fatal(rsp, errors.Wrapf(err, "cannot declare dependencies for sequence %v", sequence))
+				return rsp, nil
+			}
+			continue
 		}
 
 		// Evaluate the optional CEL condition to determine if this sequence should be processed.
@@ -259,6 +279,137 @@ func (f *Function) RunFunction(_ context.Context, req *v1.RunFunctionRequest) (*
 	maps.Copy(desiredComposed, usages)
 	rsp.Desired.Resources = nil
 	return rsp, response.SetDesiredComposedResources(rsp, desiredComposed)
+}
+
+// declareDependencies tells Crossplane a rule's sequence as dependencies:
+// each resource depends on every resource before it in the sequence, the
+// same predecessors function-sequencer waits for. Patterns are expanded
+// against the names in desired and observed state, so the dependencies name
+// resources exactly.
+//
+// Crossplane then creates each resource once what it depends on is ready,
+// and deletes it only once what depends on it is gone - including when the
+// composite itself is deleted, without the pipeline running and without
+// Usages or a foreground cascade. Nothing is removed from desired state, so
+// Crossplane can report what it is holding back.
+//
+// The one exception is a predecessor that matches no resource at all.
+// function-sequencer holds its successors back until one exists, but
+// Crossplane ignores a dependency on a resource it doesn't know about. So
+// for that pair the successors are held back the old way, by leaving them
+// out of desired state.
+func (f *Function) declareDependencies(
+	rsp *v1.RunFunctionResponse,
+	sequence []resource.Name,
+	desiredComposed map[resource.Name]*resource.DesiredComposed,
+	observedComposed map[resource.Name]resource.ObservedComposed,
+	declared map[[2]resource.Name]bool,
+	resetCompositeReadiness bool,
+) error {
+	names := composedNames(desiredComposed, observedComposed)
+
+	for i := 1; i < len(sequence); i++ {
+		dependents, err := matching(names, sequence[i])
+		if err != nil {
+			return err
+		}
+
+		for _, before := range sequence[:i] {
+			predecessors, err := matching(names, before)
+			if err != nil {
+				return err
+			}
+
+			if len(predecessors) == 0 {
+				holdBack(rsp, dependents, desiredComposed, observedComposed, resetCompositeReadiness)
+				msg := fmt.Sprintf("Delaying creation of resource(s) matching %q because %q does not exist yet", sequence[i], before)
+				response.Normal(rsp, msg)
+				f.log.Debug(msg)
+				continue
+			}
+
+			for _, d := range dependents {
+				for _, p := range predecessors {
+					if d == p || declared[[2]resource.Name{d, p}] {
+						continue
+					}
+					response.AddDependency(rsp, d, p)
+					declared[[2]resource.Name{d, p}] = true
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// composedNames returns every composed resource name in desired or observed
+// state, sorted so the dependencies come out in a stable order.
+func composedNames(desiredComposed map[resource.Name]*resource.DesiredComposed, observedComposed map[resource.Name]resource.ObservedComposed) []resource.Name {
+	names := make([]resource.Name, 0, len(desiredComposed)+len(observedComposed))
+	for n := range desiredComposed {
+		names = append(names, n)
+	}
+	for n := range observedComposed {
+		if _, ok := desiredComposed[n]; !ok {
+			names = append(names, n)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// matching returns the names a sequence entry matches, with the same strict
+// matching function-sequencer uses.
+func matching(names []resource.Name, pattern resource.Name) ([]resource.Name, error) {
+	re, err := getStrictRegex(string(pattern))
+	if err != nil {
+		return nil, errors.Wrapf(err, "cannot compile regex %s", pattern)
+	}
+	out := []resource.Name{}
+	for _, n := range names {
+		if re.MatchString(string(n)) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// holdBack leaves resources that don't exist yet out of desired state, which
+// is how function-sequencer delays their creation. One that exists already is
+// never removed, because removing it would delete it.
+func holdBack(
+	rsp *v1.RunFunctionResponse,
+	names []resource.Name,
+	desiredComposed map[resource.Name]*resource.DesiredComposed,
+	observedComposed map[resource.Name]resource.ObservedComposed,
+	resetCompositeReadiness bool,
+) {
+	for _, n := range names {
+		if _, ok := observedComposed[n]; ok {
+			continue
+		}
+		if _, ok := desiredComposed[n]; !ok {
+			continue
+		}
+		delete(desiredComposed, n)
+		if resetCompositeReadiness {
+			rsp.Desired.Composite.Ready = v1.Ready_READY_FALSE
+		}
+	}
+}
+
+// declaredDependencies returns the dependencies already in the response,
+// which response.To carried forward from earlier functions, so the same
+// dependency isn't declared twice.
+func declaredDependencies(rsp *v1.RunFunctionResponse) map[[2]resource.Name]bool {
+	declared := map[[2]resource.Name]bool{}
+	for _, d := range rsp.GetDependencies().GetItems() {
+		if c := d.GetComposedResource(); c != "" {
+			declared[[2]resource.Name{resource.Name(d.GetResource()), resource.Name(c)}] = true
+		}
+	}
+	return declared
 }
 
 // generateObservedUsages creates Usage/ClusterUsage resources for observed resources in a sequence,
