@@ -138,6 +138,11 @@ jobs:
     runs-on: ubuntu-26.04
     needs:
       - build
+    # Pushing to ghcr needs packages: write. Upstream gets it from its
+    # organization's default token; a fork's default token is read-only.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
