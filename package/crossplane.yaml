@@ -4,14 +4,18 @@ kind: Function
 metadata:
   name: function-ordering
   annotations:
-    meta.crossplane.io/maintainer: Crossplane Maintainers <info@crossplane.io>
-    meta.crossplane.io/source: github.com/crossplane-contrib/function-sequencer
+    meta.crossplane.io/maintainer: Steven Borrelli <steve@borrelli.org>
+    meta.crossplane.io/source: github.com/stevendborrelli/function-ordering
     meta.crossplane.io/license: Apache-2.0
     meta.crossplane.io/description: |
-      A composition function to define sequencing rules delaying the creation of resources until other resources are ready.
+      A fork of function-sequencer that declares its sequencing rules to
+      Crossplane as composed resource dependencies.
     meta.crossplane.io/readme: |
-      This composition function enables defining sequencing rules to delay
-      the creation of resources until other resources are ready. It is useful
-      for defining ordering between resources to optimize the provisioning flow
-      when eventual consistency is not optimal.
+      Takes function-sequencer's input unchanged. Against a Crossplane that
+      advertises CAPABILITY_DEPENDENCIES - the composed resource ordering
+      prototype, crossplane/crossplane#7842 - plain rules become dependencies,
+      and Crossplane orders creation and deletion itself. Against any other
+      Crossplane it behaves exactly as function-sequencer does.
+
+      A work in progress, not for production use.
 spec: {}
